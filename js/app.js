@@ -23,7 +23,12 @@ const normalizeOrder=row=>({
  status:row.status, created:formatDate(row.created_at), createdISO:row.created_at, updated:row.updated_at&&row.updated_at!==row.created_at?formatDate(row.updated_at):null,
  finalizedAt:row.finalized_at||null, signatureData:row.signature_data||'', signedAt:row.signed_at||null, signatureLat:row.signature_location_latitude??null, signatureLng:row.signature_location_longitude??null, signatureAccuracy:row.signature_location_accuracy??null, signatureLocationAt:row.signature_location_captured_at||null, photos:[]
 });
+let refreshInFlight=null;
+let refreshGeneration=0;
+const pendingOrderIds=new Map();
+
 async function loadOnlineData(){
+ const generation=++refreshGeneration;
  const {data:{session}}=await sb.auth.getSession();
  currentAuthUser=session?.user||null;
  if(!currentAuthUser){remoteOnline=false;return false;}
@@ -36,10 +41,14 @@ async function loadOnlineData(){
    (async()=>{
      let q=sb.from('service_orders').select('*,driver:drivers(id,name,user_id)').order('created_at',{ascending:false});
      if(db.user.role==='motorista'){
-       const {data:d,error:de}=await sb.from('drivers').select('id').eq('user_id',currentAuthUser.id).eq('active',true).maybeSingle();
-       if(de) throw de;
-       if(!d) return [];
-       q=q.eq('driver_id',d.id);
+       let driverId=profile.driver_id||null;
+       if(!driverId){
+         const {data:d,error:de}=await sb.from('drivers').select('id').eq('user_id',currentAuthUser.id).eq('active',true).limit(1).maybeSingle();
+         if(de) throw de;
+         driverId=d?.id||null;
+       }
+       if(!driverId) return [];
+       q=q.eq('driver_id',driverId);
      }
      const {data,error}=await q;
      if(error) throw error;
@@ -48,8 +57,14 @@ async function loadOnlineData(){
  ]);
  if(dr.error) throw dr.error;
  if(us.error) throw us.error;
+ if(generation!==refreshGeneration) return remoteOnline;
  db.drivers=(dr.data||[]).map(x=>({id:x.id,name:x.name,userId:x.user_id,user:(x.user_id?'':'')}));
- db.orders=(os||[]).map(normalizeOrder);
+ const serverOrders=(os||[]).map(normalizeOrder);
+ const serverIds=new Set(serverOrders.map(o=>o.id));
+ const nowMs=Date.now();
+ for(const [id,meta] of pendingOrderIds){ if(serverIds.has(id)||nowMs-meta>30000) pendingOrderIds.delete(id); }
+ const protectedLocal=db.orders.filter(o=>pendingOrderIds.has(o.id)&&!serverIds.has(o.id));
+ db.orders=[...serverOrders,...protectedLocal];
  db.users=(us.data||[]).map(x=>({id:x.id,username:x.username,name:x.full_name,role:roleToApp(x.role),photo:x.avatar_url||'',active:x.active}));
  remoteOnline=true;
  localStorage.setItem(KEY,JSON.stringify({user:db.user,orders:db.orders,drivers:db.drivers,users:db.users}));
@@ -88,7 +103,7 @@ async function initializeOnlineDatabase(){
 }
 function remoteBadge(){return remoteOnline?'<span class="online-badge">● Banco online</span>':''}
 const app=document.getElementById('app');
-const SYSTEM_VERSION='1.0.40';
+const SYSTEM_VERSION='1.0.41';
 let selectedOrderIds=new Set();
 function appFooter(){return `<footer class="app-footer"><div class="app-signature">Desenvolvido pelo Administrativo da Assistência 24 Horas</div><button type="button" class="system-info-btn" onclick="openSystemInfo()" aria-label="Informações do sistema">Sistema</button></footer>`}
 function openSystemInfo(){if(document.getElementById('systemInfoModal'))return;document.body.insertAdjacentHTML('beforeend',`<div id="systemInfoModal" class="system-modal" role="dialog" aria-modal="true" aria-labelledby="systemInfoTitle"><div class="system-modal-backdrop" onclick="closeSystemInfo()"></div><section class="system-modal-card"><div class="system-modal-head"><div class="system-modal-brand"><img src="assets/logo.png" alt="América List"><div><span class="section-kicker">INFORMAÇÕES DO SISTEMA</span><h2 id="systemInfoTitle">Sistema</h2><p>América List · Assistência 24 Horas</p></div></div><button type="button" class="system-close" onclick="closeSystemInfo()" aria-label="Fechar">×</button></div><div class="system-info-list"><div class="system-person"><span class="system-avatar">IF</span><span class="system-label"><small>Desenvolvedor</small><strong>Igor Felix</strong></span></div><div class="system-person"><span class="system-avatar">EW</span><span class="system-label"><small>Desenvolvedor</small><strong>Erick Wendell</strong></span></div><div class="system-person"><span class="system-avatar">WR</span><span class="system-label"><small>Desenvolvedor</small><strong>Weslley Renan</strong></span></div><div class="system-version"><span><small>Versão atual</small><strong>América List</strong></span><b>v${SYSTEM_VERSION}</b></div></div></section></div>`)}
@@ -114,6 +129,8 @@ window.doLogin=()=>{
  save(); dashboard();
 };
 function dashboard(){
+ window._currentView='dashboard';
+ window._currentOrderId=null;
  if(!db.user)return login();
  const visibleOrders=db.user.role==='motorista' ? db.orders.filter(o=>String(o.driver||'').toLowerCase()===String(db.user.name||'').toLowerCase()) : db.orders;
  const total=visibleOrders.length;
@@ -287,12 +304,16 @@ window.doLogin=async()=>{
 function login(){app.innerHTML=`${header()}<main class="wrap"><section class="card login"><img src="assets/logo.png"><h1>Acesso ao América List</h1><div class="field"><label>Usuário</label><input id="u" placeholder="Digite seu usuário" autocomplete="username"></div><div class="field"><label>Senha</label><input id="p" type="password" placeholder="Digite sua senha" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()"></div><button class="btn" onclick="doLogin()">Entrar</button><p class="small">Acesso protegido pelo banco de dados do América List.</p><p class="small">Seu nível de acesso é definido pela conta e não pode ser escolhido na tela de login.</p></section></main>`;renderThemeButton()}
 
 async function refreshOnline(){
-  let lastError=null;
-  for(let attempt=0; attempt<3; attempt++){
-    try{ await loadOnlineData(); return true; }
-    catch(e){ lastError=e; if(attempt<2) await new Promise(r=>setTimeout(r,300)); }
-  }
-  throw lastError||new Error('Não foi possível atualizar os dados online.');
+  if(refreshInFlight) return refreshInFlight;
+  refreshInFlight=(async()=>{
+    let lastError=null;
+    for(let attempt=0; attempt<3; attempt++){
+      try{ await loadOnlineData(); return true; }
+      catch(e){ lastError=e; if(attempt<2) await new Promise(r=>setTimeout(r,300)); }
+    }
+    throw lastError||new Error('Não foi possível atualizar os dados online.');
+  })();
+  try{return await refreshInFlight;}finally{refreshInFlight=null;}
 }
 
 window.logout=async()=>{await sb.auth.signOut();db={user:null,orders:[],drivers:[],fleet:[],users:[]};localStorage.removeItem(KEY);login()};
@@ -351,7 +372,7 @@ window.saveOrder=async()=>{
  try{
    const {data,error}=await sb.from('service_orders').insert(payload).select('*,driver:drivers(id,name,user_id)').single();
    if(error) throw error;
-   const created=normalizeOrder(data);db.orders=[created,...db.orders.filter(x=>x.id!==created.id)];saveLocal();remoteOnline=true;
+   const created=normalizeOrder(data);db.orders=[created,...db.orders.filter(x=>x.id!==created.id)];pendingOrderIds.set(created.id,Date.now());saveLocal();remoteOnline=true;
    const files=[...document.getElementById('photos').files];
    for(let i=0;i<files.length;i++){
      const f=files[i],safe=f.name.replace(/[^a-zA-Z0-9._-]/g,'_');
@@ -360,9 +381,9 @@ window.saveOrder=async()=>{
      const {error:pe}=await sb.from('os_photos').insert({os_id:created.id,storage_path:path,file_name:f.name,created_by:currentAuthUser.id});if(pe)throw new Error('O.S. salva, mas o registro da foto falhou: '+pe.message);
    }
    await loadPhotos(created.id).catch(()=>{});
-   await refreshOnline();
    alert('O.S. criada e atendimento iniciado com sucesso.');
    orders();
+   setTimeout(async()=>{try{await refreshOnline();if(window._currentView==='orders')orders();else if(window._currentView==='dashboard')dashboard();}catch(e){console.warn('Reconciliação da O.S.:',e.message||e);}},1200);
  }catch(e){alert(e.message||'Não foi possível salvar a O.S.');}
  finally{if(btn){btn.disabled=false;btn.textContent='Salvar e iniciar atendimento';}}
 };
@@ -498,7 +519,7 @@ function startRealtime(){
   const refreshAndRender=async(type)=>{
     if(!currentAuthUser)return;
     try{
-      await loadOnlineData();
+      await refreshOnline();
       if(type==='orders'){
         if(window._currentView==='dashboard') dashboard();
         else if(window._currentView==='orders') orders();
@@ -527,7 +548,7 @@ function startSyncFallback(){
   syncTimer=setInterval(async()=>{
     if(!currentAuthUser || document.hidden)return;
     try{
-      await loadOnlineData();
+      await refreshOnline();
       if(window._currentView==='dashboard') dashboard();
       else if(window._currentView==='orders') orders();
       else if(window._currentView==='viewOrder' && window._currentOrderId) viewOrder(window._currentOrderId);
