@@ -21,7 +21,7 @@ const normalizeOrder=row=>({
  origin:row.origin||'', destination:row.destination||'', km:row.mileage??'', damages:Array.isArray(row.preexisting_damages)?row.preexisting_damages:[],
  tires:row.tires||'', keys:row.keys_with||'', obs:row.checklist?.observations||'', checks:row.checklist?.items||row.checklist||{},
  status:row.status, created:formatDate(row.created_at), createdISO:row.created_at, updated:row.updated_at&&row.updated_at!==row.created_at?formatDate(row.updated_at):null,
- finalizedAt:row.finalized_at||null, photos:[]
+ finalizedAt:row.finalized_at||null, signatureData:row.signature_data||'', signedAt:row.signed_at||null, photos:[]
 });
 async function loadOnlineData(){
  const {data:{session}}=await sb.auth.getSession();
@@ -33,9 +33,21 @@ async function loadOnlineData(){
  const [dr,us,os]=await Promise.all([
    sb.from('drivers').select('id,user_id,name,active,created_at,updated_at').eq('active',true).order('name'),
    db.user.role==='admin'?sb.from('profiles').select('*').order('created_at'):Promise.resolve({data:[],error:null}),
-   adminApi('/api/orders')
+   (async()=>{
+     let q=sb.from('service_orders').select('*,driver:drivers(id,name,user_id)').order('created_at',{ascending:false});
+     if(db.user.role==='motorista'){
+       const {data:d,error:de}=await sb.from('drivers').select('id').eq('user_id',currentAuthUser.id).eq('active',true).maybeSingle();
+       if(de) throw de;
+       if(!d) return [];
+       q=q.eq('driver_id',d.id);
+     }
+     const {data,error}=await q;
+     if(error) throw error;
+     return data||[];
+   })()
  ]);
  if(dr.error) throw dr.error;
+ if(us.error) throw us.error;
  db.drivers=(dr.data||[]).map(x=>({id:x.id,name:x.name,userId:x.user_id,user:(x.user_id?'':'')}));
  db.orders=(os||[]).map(normalizeOrder);
  db.users=(us.data||[]).map(x=>({id:x.id,username:x.username,name:x.full_name,role:roleToApp(x.role),photo:x.avatar_url||'',active:x.active}));
@@ -76,7 +88,7 @@ async function initializeOnlineDatabase(){
 }
 function remoteBadge(){return remoteOnline?'<span class="online-badge">● Banco online</span>':''}
 const app=document.getElementById('app');
-const SYSTEM_VERSION='1.0.36';
+const SYSTEM_VERSION='1.0.37';
 function appFooter(){return `<footer class="app-footer"><div class="app-signature">Desenvolvido pelo Administrativo da Assistência 24 Horas</div><button type="button" class="system-info-btn" onclick="openSystemInfo()" aria-label="Informações do sistema">Sistema</button></footer>`}
 function openSystemInfo(){if(document.getElementById('systemInfoModal'))return;document.body.insertAdjacentHTML('beforeend',`<div id="systemInfoModal" class="system-modal" role="dialog" aria-modal="true" aria-labelledby="systemInfoTitle"><div class="system-modal-backdrop" onclick="closeSystemInfo()"></div><section class="system-modal-card"><div class="system-modal-head"><div class="system-modal-brand"><img src="assets/logo.png" alt="América List"><div><span class="section-kicker">INFORMAÇÕES DO SISTEMA</span><h2 id="systemInfoTitle">Sistema</h2><p>América List · Assistência 24 Horas</p></div></div><button type="button" class="system-close" onclick="closeSystemInfo()" aria-label="Fechar">×</button></div><div class="system-info-list"><div class="system-person"><span class="system-avatar">IF</span><span class="system-label"><small>Desenvolvedor</small><strong>Igor Felix</strong></span></div><div class="system-person"><span class="system-avatar">EW</span><span class="system-label"><small>Desenvolvedor</small><strong>Erick Wendell</strong></span></div><div class="system-person"><span class="system-avatar">WR</span><span class="system-label"><small>Desenvolvedor</small><strong>Weslley Renan</strong></span></div><div class="system-version"><span><small>Versão atual</small><strong>América List</strong></span><b>v${SYSTEM_VERSION}</b></div></div></section></div>`)}
 function closeSystemInfo(){document.getElementById('systemInfoModal')?.remove()}
@@ -142,22 +154,24 @@ function orders(){const visibleOrders=db.user?.role==='motorista'?db.orders.filt
 window.filterOrders=()=>{const p=(document.getElementById('qProtocol').value||'').toLowerCase(),d=(document.getElementById('qDriver').value||'').toLowerCase(),pl=(document.getElementById('qPlate').value||'').toLowerCase();const base=window._ordersBase||db.orders;const l=base.slice().reverse().filter(o=>String(o.protocol).toLowerCase().includes(p)&&String(o.driver).toLowerCase().includes(d)&&String(o.plate).toLowerCase().includes(pl));document.getElementById('orderResults').innerHTML=orderTable(l);updateOrderResultsCount(l.length)};window.updateOrderResultsCount=n=>{const el=document.getElementById('resultsCount');if(el){const count=n??((window._ordersBase||db.orders).length);el.textContent=`${count} ${count===1?'ordem':'ordens'}`}};window.statusOrders=status=>{if(status==='all')return orders();const base=db.user?.role==='motorista'?db.orders.filter(o=>String(o.driver||'').toLowerCase()===String(db.user.name||'').toLowerCase()):db.orders;app.innerHTML=`${header()}<main class="wrap">${nav()}<section class="card"><div class="section-head"><div><h2>${esc(status)}</h2><p class="small">${base.filter(o=>o.status===status).length} ordem(ns) encontrada(s) neste status.</p></div><button class="btn gray" onclick="dashboard()">Voltar ao Painel</button></div>${orderTable(base.slice().reverse().filter(o=>o.status===status))}</section></main>`};window.driverOrders=name=>{const base=db.user?.role==='motorista'?db.orders.filter(o=>String(o.driver||'').toLowerCase()===String(db.user.name||'').toLowerCase()):db.orders;const list=base.slice().reverse().filter(o=>String(o.driver||'').toLowerCase()===String(name).toLowerCase());const atend=list.filter(o=>o.status==='Em atendimento').length,fin=list.filter(o=>o.status==='Finalizada').length,prob=list.filter(o=>o.status==='Com problema').length;const rows=list.length?list.map(o=>`<button type="button" class="driver-order-card" onclick="viewOrder('${o.id}')"><span class="driver-order-main"><b>Protocolo ${esc(o.protocol||'—')}</b><small>Placa ${esc(o.plate||'—')} · ${esc(o.model||'—')}</small><small>${esc(o.created||'—')}</small></span><span class="driver-order-meta">${statusPillForDriver(o.status)}<span class="driver-order-arrow">›</span></span></button>`).join(''):'<div class="empty-state"><div class="empty-icon">✓</div><div><b>Nenhuma O.S. encontrada</b><p class="small">Não há protocolos registrados para este motorista.</p></div></div>';app.innerHTML=`${header()}<main class="wrap">${nav()}<section class="card driver-detail"><div class="section-head"><div><div class="eyebrow driver-eyebrow">DETALHAMENTO DO MOTORISTA</div><h2>${esc(name)}</h2><p class="small">Todos os protocolos e dados correspondentes às O.S. deste motorista.</p></div><button class="btn gray" onclick="dashboard()">Voltar ao Painel</button></div><div class="driver-summary"><div class="mini-stat"><b>${list.length}</b><span>Total de O.S.</span></div><div class="mini-stat orange"><b>${atend}</b><span>Em atendimento</span></div><div class="mini-stat green"><b>${fin}</b><span>Finalizadas</span></div><div class="mini-stat red"><b>${prob}</b><span>Com problema</span></div></div></section><section class="card driver-orders-panel"><div class="section-head"><div><span class="section-kicker">PROTOCOLOS</span><h2>Ordens deste motorista</h2><p class="small">Clique em uma ordem para visualizar todos os dados, checklist e fotos.</p></div><span class="chart-badge">${list.length} ${list.length===1?'protocolo':'protocolos'}</span></div><div class="driver-order-list">${rows}</div></section></main>`};
 window.deleteOrder=id=>{if(db.user?.role!=='admin')return;const o=db.orders.find(x=>x.id===id);if(!o)return;if(confirm(`Excluir a O.S. do protocolo ${o.protocol}? Esta ação não pode ser desfeita.`)){db.orders=db.orders.filter(x=>x.id!==id);save();orders()}};
 function driverOptions(){return `<option value="">Selecione o motorista</option>${db.drivers.map(d=>`<option value="${esc(d.name)}">${esc(d.name)}</option>`).join('')}`}
-function newOrder(){const items=checklist.map(x=>`<div class="check"><span>${x}</span><select data-item="${x}"><option>OK</option><option>Problema</option><option>Não se aplica</option></select></div>`).join('');const now=new Date(),generatedAt=now.toLocaleString('pt-BR');app.innerHTML=`${header()}<main class="wrap">${nav()}<section class="card"><h2>Nova Ordem de Serviço</h2><div class="notice"><b>Data e hora da O.S.:</b> ${generatedAt}<br><span class="small">Registrada automaticamente no momento da criação.</span></div><div class="grid"><div class="field"><label>Motorista <span class="req">*</span></label>${db.user?.role==='motorista'?`<input id="driver" value="${esc(db.user.name)}" readonly>`:`<select id="driver"><option value="">Selecione o motorista</option>${db.drivers.map(d=>`<option value="${esc(d.name)}">${esc(d.name)}</option>`).join('')}</select>`}</div><div class="field"><label>Placa <span class="req">*</span></label><input id="plate" placeholder="ABC1D23"></div><div class="field"><label>Associado <span class="req">*</span></label><input id="assoc" placeholder="Nome do associado"></div><div class="field"><label>Tipo de Veículo <span class="req">*</span></label><select id="vehicleType"><option value="">Selecione o tipo</option>${vehicleTypes.map(v=>`<option>${v}</option>`).join('')}</select></div><div class="field"><label>Modelo do Veículo <span class="req">*</span></label><input id="model" placeholder="Ex.: Toyota Hilux"></div><div class="field"><label>Cor <span class="req">*</span></label><select id="color"><option value="">Selecione a cor</option>${colors.map(c=>`<option>${c}</option>`).join('')}</select></div><div class="field"><label>Protocolo <span class="req">*</span></label><input id="protocol" placeholder="Número do protocolo"></div><div class="field"><label>Local Origem</label><input id="origin" placeholder="Endereço de origem"></div><div class="field"><label>Local Destino</label><input id="destination" placeholder="Endereço de destino"></div><div class="field"><label>Quilometragem</label><input id="km" type="number"></div></div><h3>Danos ou Avarias Pré-Existentes</h3><div class="grid">${['Amassado','Manchado','Arranhado','Roda Travada','Vidro Quebrado ou trincado','Porta Danificada','Retrovisores'].map(x=>`<label class="option"><input type="checkbox" name="damage" value="${x}"> ${x}</label>`).join('')}</div><h3>Pneus</h3><div class="field"><select id="tires"><option value="">Selecione</option><option>Bons</option><option>Novos</option><option>Ruins</option></select></div><h3>Chaves Acompanhando</h3><div class="field"><select id="keys"><option value="">Selecione</option><option>Sim</option><option>Não</option></select></div><h3>Checklist</h3>${items}<div class="field"><label>Observações</label><textarea id="obs"></textarea></div><div class="field"><label>Fotos do atendimento</label><input id="photos" type="file" accept="image/*" multiple></div><div id="validation" class="notice hidden"></div><div class="row"><button class="btn green" onclick="saveOrder()">Salvar e iniciar atendimento</button><button class="btn gray" onclick="dashboard()">Cancelar</button></div></section></main>`}
+function newOrder(){const items=checklist.map(x=>`<div class="check"><span>${x}</span><select data-item="${x}"><option>OK</option><option>Problema</option><option>Não se aplica</option></select></div>`).join('');const now=new Date(),generatedAt=now.toLocaleString('pt-BR');app.innerHTML=`${header()}<main class="wrap">${nav()}<section class="card"><h2>Nova Ordem de Serviço</h2><div class="notice"><b>Data e hora da O.S.:</b> ${generatedAt}<br><span class="small">Registrada automaticamente no momento da criação.</span></div><div class="grid"><div class="field"><label>Motorista <span class="req">*</span></label>${db.user?.role==='motorista'?`<input id="driver" value="${esc(db.user.name)}" readonly>`:`<select id="driver"><option value="">Selecione o motorista</option>${db.drivers.map(d=>`<option value="${esc(d.name)}">${esc(d.name)}</option>`).join('')}</select>`}</div><div class="field"><label>Placa <span class="req">*</span></label><input id="plate" placeholder="ABC1D23"></div><div class="field"><label>Associado <span class="req">*</span></label><input id="assoc" placeholder="Nome do associado"></div><div class="field"><label>Tipo de Veículo <span class="req">*</span></label><select id="vehicleType"><option value="">Selecione o tipo</option>${vehicleTypes.map(v=>`<option>${v}</option>`).join('')}</select></div><div class="field"><label>Modelo do Veículo <span class="req">*</span></label><input id="model" placeholder="Ex.: Toyota Hilux"></div><div class="field"><label>Cor <span class="req">*</span></label><select id="color"><option value="">Selecione a cor</option>${colors.map(c=>`<option>${c}</option>`).join('')}</select></div><div class="field"><label>Protocolo <span class="req">*</span></label><input id="protocol" placeholder="Número do protocolo"></div><div class="field"><label>Local Origem</label><input id="origin" placeholder="Endereço de origem"></div><div class="field"><label>Local Destino</label><input id="destination" placeholder="Endereço de destino"></div><div class="field"><label>Quilometragem</label><input id="km" type="number"></div></div><h3>Danos ou Avarias Pré-Existentes</h3><div class="grid">${['Amassado','Manchado','Arranhado','Roda Travada','Vidro Quebrado ou trincado','Porta Danificada','Retrovisores'].map(x=>`<label class="option"><input type="checkbox" name="damage" value="${x}"> ${x}</label>`).join('')}</div><h3>Pneus</h3><div class="field"><select id="tires"><option value="">Selecione</option><option>Bons</option><option>Novos</option><option>Ruins</option></select></div><h3>Chaves Acompanhando</h3><div class="field"><select id="keys"><option value="">Selecione</option><option>Sim</option><option>Não</option></select></div><h3>Checklist</h3>${items}<div class="field"><label>Observações</label><textarea id="obs"></textarea></div><div class="field"><label>Fotos do atendimento</label><input id="photos" type="file" accept="image/*" multiple></div><section class="signature-card"><div class="section-head"><div><span class="section-kicker">ASSINATURA</span><h3>Assinatura do Associado</h3><p class="small">Assine diretamente na tela usando o dedo, como uma caneta.</p></div></div><div class="signature-pad-wrap"><canvas id="signaturePad" class="signature-pad" aria-label="Área para assinatura"></canvas><div class="signature-hint">Use o dedo para assinar aqui</div></div><div class="row"><button type="button" class="btn gray" onclick="clearSignature()">Limpar assinatura</button></div></section><div id="validation" class="notice hidden"></div><div class="row"><button class="btn green" onclick="saveOrder()">Salvar e iniciar atendimento</button><button class="btn gray" onclick="dashboard()">Cancelar</button></div></section></main>`;initSignaturePad();renderThemeButton()}
 window.saveOrder=async()=>{const required=[['driver','Motorista'],['plate','Placa'],['assoc','Associado'],['vehicleType','Tipo de Veículo'],['model','Modelo do Veículo'],['color','Cor'],['protocol','Protocolo']];const missing=required.filter(([id])=>!document.getElementById(id).value.trim()).map(x=>x[1]);document.querySelectorAll('.invalid').forEach(x=>x.classList.remove('invalid'));if(missing.length){missing.forEach(n=>{const pair=required.find(x=>x[1]===n);document.getElementById(pair[0]).classList.add('invalid')});const v=document.getElementById('validation');v.classList.remove('hidden');v.innerHTML='<b>Preencha os campos obrigatórios:</b> '+missing.join(', ');return}const protocol=document.getElementById('protocol').value.trim();const duplicate=db.orders.some(x=>String(x.protocol||'').trim().toLowerCase()===protocol.toLowerCase());if(duplicate){const v=document.getElementById('validation');v.classList.remove('hidden');v.innerHTML='<b>Protocolo duplicado.</b> Já existe uma O.S. cadastrada com este protocolo. Informe outro número.';document.getElementById('protocol').classList.add('invalid');document.getElementById('protocol').focus();return}const checks={};document.querySelectorAll('[data-item]').forEach(s=>checks[s.dataset.item]=s.value);const damages=[...document.querySelectorAll('input[name="damage"]:checked')].map(x=>x.value);let photos=[];for(const f of document.getElementById('photos').files)photos.push(await readFile(f));const createdAt=new Date();const o={id:String(Date.now()),driver:document.getElementById('driver').value,plate:document.getElementById('plate').value.toUpperCase(),assoc:document.getElementById('assoc').value,vehicleType:document.getElementById('vehicleType').value,model:document.getElementById('model').value,color:document.getElementById('color').value,protocol:document.getElementById('protocol').value,origin:document.getElementById('origin').value,destination:document.getElementById('destination').value,km:document.getElementById('km').value,damages,tires:document.getElementById('tires').value,keys:document.getElementById('keys').value,obs:document.getElementById('obs').value,checks,photos,status:'Em atendimento',created:createdAt.toLocaleString('pt-BR'),createdISO:createdAt.toISOString(),updated:null};db.orders.push(o);save();viewOrder(o.id)};
 const readFile=f=>new Promise(r=>{const x=new FileReader();x.onload=()=>r(x.result);x.readAsDataURL(f)});
-function viewOrder(id){const o=db.orders.find(x=>x.id===id);if(!o)return;const canEdit=db.user?.role==='admin';app.innerHTML=`${header()}<main class="wrap">${nav()}<section class="card"><div class="row"><h2 style="margin-right:auto">Protocolo ${esc(o.protocol)}</h2><span class="pill">${esc(o.status)}</span></div><div class="notice"><b>Data e hora da O.S.:</b> ${esc(o.created)}${o.updated?`<br><span class="small">Última alteração: ${esc(o.updated)}</span>`:''}</div><div class="grid"><div><b>Motorista</b><p>${esc(o.driver)}</p></div><div><b>Placa</b><p>${esc(o.plate)}</p></div><div><b>Associado</b><p>${esc(o.assoc)}</p></div><div><b>Tipo de Veículo</b><p>${esc(o.vehicleType)}</p></div><div><b>Modelo</b><p>${esc(o.model)}</p></div><div><b>Cor</b><p>${esc(o.color)}</p></div><div><b>Protocolo</b><p>${esc(o.protocol)}</p></div><div><b>Local Origem</b><p>${esc(o.origin)||'-'}</p></div><div><b>Local Destino</b><p>${esc(o.destination)||'-'}</p></div><div><b>KM</b><p>${esc(o.km)||'-'}</p></div><div><b>Pneus</b><p>${esc(o.tires)||'-'}</p></div><div><b>Chaves Acompanhando</b><p>${esc(o.keys)||'-'}</p></div></div><h3>Danos ou Avarias Pré-Existentes</h3><p>${o.damages?.length?o.damages.map(esc).join(', '):'Nenhuma informada.'}</p><h3>Checklist</h3>${checklist.map(k=>`<div class="check"><span>${k}</span><b>${esc(o.checks[k])}</b></div>`).join('')}<h3>Observações</h3><p>${esc(o.obs)||'-'}</p><h3>Fotos</h3>${o.photos?.map(p=>`<a href="${p}" download="foto-os-${o.protocol}.jpg" title="Baixar foto"><img class="photo" src="${p}"></a>`).join('')||'<span class="small">Sem fotos.</span>'}<div class="row" style="margin-top:18px">${canEdit?`<button class="btn" onclick="editOrder('${o.id}')">Editar O.S.</button><button class="btn" onclick="printOrder('${o.id}')">Salvar / Imprimir PDF</button>`:''}<button class="btn green" onclick="finishOrder('${o.id}')">Finalizar O.S.</button><button class="btn red" onclick="problemOrder('${o.id}')">Marcar com problema</button><button class="btn gray" onclick="orders()">Voltar</button></div></section></main>`}
+function viewOrder(id){const o=db.orders.find(x=>x.id===id);if(!o)return;const canEdit=db.user?.role==='admin';app.innerHTML=`${header()}<main class="wrap">${nav()}<section class="card"><div class="row"><h2 style="margin-right:auto">Protocolo ${esc(o.protocol)}</h2><span class="pill">${esc(o.status)}</span></div><div class="notice"><b>Data e hora da O.S.:</b> ${esc(o.created)}${o.updated?`<br><span class="small">Última alteração: ${esc(o.updated)}</span>`:''}</div><div class="grid"><div><b>Motorista</b><p>${esc(o.driver)}</p></div><div><b>Placa</b><p>${esc(o.plate)}</p></div><div><b>Associado</b><p>${esc(o.assoc)}</p></div><div><b>Tipo de Veículo</b><p>${esc(o.vehicleType)}</p></div><div><b>Modelo</b><p>${esc(o.model)}</p></div><div><b>Cor</b><p>${esc(o.color)}</p></div><div><b>Protocolo</b><p>${esc(o.protocol)}</p></div><div><b>Local Origem</b><p>${esc(o.origin)||'-'}</p></div><div><b>Local Destino</b><p>${esc(o.destination)||'-'}</p></div><div><b>KM</b><p>${esc(o.km)||'-'}</p></div><div><b>Pneus</b><p>${esc(o.tires)||'-'}</p></div><div><b>Chaves Acompanhando</b><p>${esc(o.keys)||'-'}</p></div></div><h3>Danos ou Avarias Pré-Existentes</h3><p>${o.damages?.length?o.damages.map(esc).join(', '):'Nenhuma informada.'}</p><h3>Checklist</h3>${checklist.map(k=>`<div class="check"><span>${k}</span><b>${esc(o.checks[k])}</b></div>`).join('')}<h3>Observações</h3><p>${esc(o.obs)||'-'}</p><h3>Assinatura do Associado</h3>${o.signatureData?`<div class="signature-preview"><img src="${esc(o.signatureData)}" alt="Assinatura do associado"></div>`:'<span class="small">Sem assinatura registrada.</span>'}<h3>Fotos</h3>${o.photos?.map(p=>`<a href="${p}" download="foto-os-${o.protocol}.jpg" title="Baixar foto"><img class="photo" src="${p}"></a>`).join('')||'<span class="small">Sem fotos.</span>'}<div class="row" style="margin-top:18px">${canEdit?`<button class="btn" onclick="editOrder('${o.id}')">Editar O.S.</button>`:''}<button class="btn" onclick="printOrder('${o.id}')">Salvar / Imprimir PDF</button><button class="btn green" onclick="finishOrder('${o.id}')">Finalizar O.S.</button><button class="btn red" onclick="problemOrder('${o.id}')">Marcar com problema</button><button class="btn gray" onclick="orders()">Voltar</button></div></section></main>`}
 window.driverOrdersByIndex=i=>{const name=window._driverChartNames?.[Number(i)];if(name)driverOrders(name)};window.viewOrder=viewOrder;window.finishOrder=id=>{const o=db.orders.find(x=>x.id===id);if(o){o.status='Finalizada';save();viewOrder(id)}};window.problemOrder=id=>{const o=db.orders.find(x=>x.id===id);if(o){o.status='Com problema';save();viewOrder(id)}};
 function editOrder(id){const o=db.orders.find(x=>x.id===id);if(!o)return;app.innerHTML=`${header()}<main class="wrap">${nav()}<section class="card"><h2>Editar O.S. — Protocolo ${esc(o.protocol)}</h2><div class="grid"><div class="field"><label>Motorista <span class="req">*</span></label><select id="driver">${db.drivers.map(d=>`<option ${d.name===o.driver?'selected':''}>${esc(d.name)}</option>`).join('')}</select></div><div class="field"><label>Placa <span class="req">*</span></label><input id="plate" value="${esc(o.plate)}"></div><div class="field"><label>Associado <span class="req">*</span></label><input id="assoc" value="${esc(o.assoc)}"></div><div class="field"><label>Tipo de Veículo <span class="req">*</span></label><select id="vehicleType">${vehicleTypes.map(v=>`<option ${v===o.vehicleType?'selected':''}>${v}</option>`).join('')}</select></div><div class="field"><label>Modelo do Veículo <span class="req">*</span></label><input id="model" value="${esc(o.model)}"></div><div class="field"><label>Cor <span class="req">*</span></label><select id="color">${colors.map(v=>`<option ${v===o.color?'selected':''}>${v}</option>`).join('')}</select></div><div class="field"><label>Protocolo <span class="req">*</span></label><input id="protocol" value="${esc(o.protocol)}"></div><div class="field"><label>Local Origem</label><input id="origin" value="${esc(o.origin)}"></div><div class="field"><label>Local Destino</label><input id="destination" value="${esc(o.destination)}"></div><div class="field"><label>Quilometragem</label><input id="km" value="${esc(o.km)}"></div><div class="field"><label>Pneus</label><select id="tires"><option></option>${['Bons','Novos','Ruins'].map(v=>`<option ${v===o.tires?'selected':''}>${v}</option>`).join('')}</select></div><div class="field"><label>Chaves Acompanhando</label><select id="keys"><option></option><option ${o.keys==='Sim'?'selected':''}>Sim</option><option ${o.keys==='Não'?'selected':''}>Não</option></select></div></div><h3>Danos ou Avarias Pré-Existentes</h3><div class="grid">${['Amassado','Manchado','Arranhado','Roda Travada','Vidro Quebrado ou trincado','Porta Danificada','Retrovisores'].map(x=>`<label class="option"><input type="checkbox" name="damage" value="${x}" ${o.damages?.includes(x)?'checked':''}> ${x}</label>`).join('')}</div><div class="field"><label>Observações</label><textarea id="obs">${esc(o.obs)}</textarea></div><div class="row"><button class="btn green" onclick="updateOrder('${o.id}')">Salvar alterações</button><button class="btn gray" onclick="viewOrder('${o.id}')">Cancelar</button></div></section></main>`}
 window.editOrder=editOrder;window.updateOrder=id=>{const o=db.orders.find(x=>x.id===id);if(!o)return;const req=['driver','plate','assoc','vehicleType','model','color','protocol'];if(req.some(id=>!document.getElementById(id).value.trim())){alert('Preencha todos os campos obrigatórios.');return}const protocol=document.getElementById('protocol').value.trim();const duplicate=db.orders.some(x=>x.id!==id&&String(x.protocol||'').trim().toLowerCase()===protocol.toLowerCase());if(duplicate){alert('Protocolo duplicado. Já existe outra O.S. cadastrada com este protocolo. Informe outro número.');document.getElementById('protocol').classList.add('invalid');document.getElementById('protocol').focus();return}Object.assign(o,{driver:document.getElementById('driver').value,plate:document.getElementById('plate').value.toUpperCase(),assoc:document.getElementById('assoc').value,vehicleType:document.getElementById('vehicleType').value,model:document.getElementById('model').value,color:document.getElementById('color').value,protocol,origin:document.getElementById('origin').value,destination:document.getElementById('destination').value,km:document.getElementById('km').value,tires:document.getElementById('tires').value,keys:document.getElementById('keys').value,damages:[...document.querySelectorAll('input[name="damage"]:checked')].map(x=>x.value),obs:document.getElementById('obs').value,updated:new Date().toLocaleString('pt-BR')});save();viewOrder(id)};
 function printOrder(id){
  const o=db.orders.find(x=>x.id===id);if(!o)return;
  const w=window.open('','_blank');
- const logo='assets/logo.png';
+ if(!w){alert('O navegador bloqueou a janela de impressão. Permita pop-ups para o América List e tente novamente.');return;}
+ const logo=new URL('assets/logo.png', document.baseURI).href;
  const field=(label,value)=>`<div class="info-box"><span>${label}</span><strong>${esc(value)||'-'}</strong></div>`;
  const damages=o.damages?.length?o.damages.map(esc).join(' • '):'Nenhuma informada';
  const photos=o.photos?.length?o.photos.map((p,i)=>`<a href="${p}" download="foto-${o.protocol}-${i+1}.jpg" title="Clique para baixar a foto"><img src="${p}" class="photo"></a>`).join(''):'<div class="empty">Sem fotos anexadas</div>';
- w.document.write(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>O.S. ${esc(o.protocol)} — América List</title><style>
- @page{size:A4;margin:14mm}*{box-sizing:border-box}body{margin:0;font-family:Arial,Helvetica,sans-serif;color:#1b2738;background:#fff;font-size:11px}.page{max-width:780px;margin:auto}.header{display:flex;align-items:center;justify-content:space-between;border-bottom:4px solid #c9232b;padding:4px 0 12px;margin-bottom:16px}.brand{display:flex;align-items:center;gap:14px}.brand img{width:86px;height:auto;object-fit:contain}.brand-title{font-size:23px;font-weight:800;color:#123f82}.brand-title span{color:#c9232b}.subtitle{font-size:11px;color:#52657d;margin-top:4px;font-weight:600}.doc{text-align:right}.doc-label{font-size:10px;color:#6c7b8d;text-transform:uppercase;letter-spacing:.7px}.protocol{font-size:18px;font-weight:800;color:#123f82;margin-top:3px}.meta{display:flex;justify-content:space-between;gap:12px;background:#f3f6fa;border-left:5px solid #123f82;padding:10px 12px;margin-bottom:16px}.meta b{color:#123f82}.section{margin-top:15px}.section h3{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:#123f82;border-bottom:1px solid #dbe3ec;padding-bottom:6px;margin:0 0 9px}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:7px}.info-box{border:1px solid #dce3eb;border-radius:6px;padding:8px 9px;min-height:38px;background:#fff}.info-box span{display:block;color:#6d7c8e;font-size:9px;text-transform:uppercase;margin-bottom:3px}.info-box strong{font-size:11px;color:#1d2c3d}.wide{grid-column:1/-1}.damage{padding:9px;border:1px solid #dce3eb;border-radius:6px;background:#fafbfd}.checks{display:grid;grid-template-columns:1fr 1fr;gap:5px}.check{display:flex;justify-content:space-between;gap:10px;border:1px solid #e1e6ed;border-radius:5px;padding:7px 9px}.check b{color:#123f82}.obs{border:1px solid #dce3eb;border-radius:6px;padding:10px;min-height:48px}.photos{display:flex;flex-wrap:wrap;gap:8px}.photos a{display:block;text-decoration:none}.photo{width:145px;height:105px;object-fit:cover;border:1px solid #dce3eb;border-radius:5px}.empty{color:#7a8795;font-style:italic;padding:8px}.footer{border-top:1px solid #dce3eb;margin-top:20px;padding-top:10px;display:flex;justify-content:space-between;color:#718095;font-size:9px}.footer strong{color:#123f82}@media print{.page{max-width:none}.no-print{display:none}}
+ w.document.open();
+ w.document.write(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>O.S. ${esc(o.protocol)} — América List</title><style>
+ @page{size:A4;margin:14mm}*{box-sizing:border-box}body{margin:0;font-family:Arial,Helvetica,sans-serif;color:#1b2738;background:#fff;font-size:11px}.page{max-width:780px;margin:auto}.header{display:flex;align-items:center;justify-content:space-between;border-bottom:4px solid #c9232b;padding:4px 0 12px;margin-bottom:16px}.brand{display:flex;align-items:center;gap:14px}.brand img{width:86px;height:auto;object-fit:contain}.brand-title{font-size:23px;font-weight:800;color:#123f82}.brand-title span{color:#c9232b}.subtitle{font-size:11px;color:#52657d;margin-top:4px;font-weight:600}.doc{text-align:right}.doc-label{font-size:10px;color:#6c7b8d;text-transform:uppercase;letter-spacing:.7px}.protocol{font-size:18px;font-weight:800;color:#123f82;margin-top:3px}.meta{display:flex;justify-content:space-between;gap:12px;background:#f3f6fa;border-left:5px solid #123f82;padding:10px 12px;margin-bottom:16px}.meta b{color:#123f82}.section{margin-top:15px}.section h3{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:#123f82;border-bottom:1px solid #dbe3ec;padding-bottom:6px;margin:0 0 9px}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:7px}.info-box{border:1px solid #dce3eb;border-radius:6px;padding:8px 9px;min-height:38px;background:#fff}.info-box span{display:block;color:#6d7c8e;font-size:9px;text-transform:uppercase;margin-bottom:3px}.info-box strong{font-size:11px;color:#1d2c3d}.wide{grid-column:1/-1}.damage{padding:9px;border:1px solid #dce3eb;border-radius:6px;background:#fafbfd}.checks{display:grid;grid-template-columns:1fr 1fr;gap:5px}.check{display:flex;justify-content:space-between;gap:10px;border:1px solid #e1e6ed;border-radius:5px;padding:7px 9px}.check b{color:#123f82}.obs{border:1px solid #dce3eb;border-radius:6px;padding:10px;min-height:48px;white-space:pre-wrap}.photos{display:flex;flex-wrap:wrap;gap:8px}.photos a{display:block;text-decoration:none}.photo{width:145px;height:105px;object-fit:cover;border:1px solid #dce3eb;border-radius:5px}.empty{color:#7a8795;font-style:italic;padding:8px}.footer{border-top:1px solid #dce3eb;margin-top:20px;padding-top:10px;display:flex;justify-content:space-between;color:#718095;font-size:9px}.footer strong{color:#123f82}.signature{margin-top:14px;text-align:center;color:#718095;font-size:9px}.signature-line{width:220px;border-top:1px solid #9eabb8;margin:0 auto 5px}@media print{.page{max-width:none}.no-print{display:none}}
  </style></head><body><div class="page">
  <header class="header"><div class="brand"><img src="${logo}"><div><div class="brand-title">América <span>List</span></div><div class="subtitle">Assistência 24 Horas - América Assistência</div></div></div><div class="doc"><div class="doc-label">Ordem de Serviço</div><div class="protocol">Protocolo ${esc(o.protocol)}</div></div></header>
  <div class="meta"><div><b>Data e hora da geração:</b> ${esc(o.created)}</div><div><b>Status:</b> ${esc(o.status)}</div></div>
@@ -165,10 +179,11 @@ function printOrder(id){
  <section class="section"><h3>Condições do veículo</h3><div class="grid">${field('Pneus',o.tires)}${field('Chaves acompanhando',o.keys)}<div class="damage wide"><b>Danos ou Avarias Pré-Existentes:</b><br>${damages}</div></div></section>
  <section class="section"><h3>Checklist</h3><div class="checks">${checklist.map(k=>`<div class="check"><span>${esc(k)}</span><b>${esc(o.checks[k])}</b></div>`).join('')}</div></section>
  <section class="section"><h3>Observações</h3><div class="obs">${esc(o.obs)||'Nenhuma observação registrada.'}</div></section>
- <section class="section"><h3>Fotos do atendimento</h3><div class="photos">${photos}</div></section>
- <footer class="footer"><span><strong>América List</strong> • Checklist e Ordem de Serviço</span><span>Assistência 24 Horas - América Assistência</span></footer><div class="signature"><div class="signature-line"></div><div class="signature-text">Desenvolvido pelo Administrativo da Assistência 24 Horas</div></div>
- </div></body></html>`);
- w.document.close();w.focus();setTimeout(()=>w.print(),400)
+ <section class="section"><h3>Assinatura do Associado</h3>${o.signatureData?`<div><img src="${esc(o.signatureData)}" style="max-width:320px;max-height:110px;object-fit:contain;border-bottom:1px solid #9eabb8"></div>`:'<div class="empty">Sem assinatura registrada</div>'}</section><section class="section"><h3>Fotos do atendimento</h3><div class="photos">${photos}</div></section>
+ <footer class="footer"><span><strong>América List</strong> • Checklist e Ordem de Serviço</span><span>Assistência 24 Horas - América Assistência</span></footer><div class="signature"><div class="signature-line"></div><div>Desenvolvido pelo Administrativo da Assistência 24 Horas</div></div>
+ </div><script>window.addEventListener('load',()=>setTimeout(()=>window.print(),500));<\/script></body></html>`);
+ w.document.close();
+ w.focus();
 }
 window.printOrder=printOrder;
 function commands(){if(db.user?.role!=='admin')return dashboard();app.innerHTML=`${header()}<main class="wrap commands-wrap">${nav()}<section class="page-hero commands-hero"><div><span class="page-kicker">ADMINISTRAÇÃO</span><h1>Comandos</h1><p>Gerencie os acessos e a equipe da operação.</p></div><div class="page-hero-badge">⚙ <span>Área administrativa</span></div></section><section class="command-grid"><button class="command-card" onclick="manageUsers()"><span class="command-icon blue-icon">♙</span><span><b>Usuários</b><small>Cadastre acessos, altere senhas e níveis de permissão.</small></span><strong>›</strong></button><button class="command-card" onclick="manageDrivers()"><span class="command-icon green-icon">♟</span><span><b>Motoristas</b><small>Cadastre, edite e organize os motoristas da equipe.</small></span><strong>›</strong></button><button class="command-card" onclick="profile()"><span class="command-icon orange-icon">◉</span><span><b>Perfil</b><small>Altere seus próprios dados, nome e foto de perfil.</small></span><strong>›</strong></button></section></main>`;renderThemeButton()}
@@ -251,9 +266,13 @@ window.doLogin=async()=>{
   if(!username||!password){alert('Informe usuário e senha.');return;}
   const btn=document.querySelector('.login .btn'); if(btn){btn.disabled=true;btn.textContent='Entrando…';}
   try{
-    const {data:emailData,error:emailError}=await sb.rpc('login_email_by_username',{p_username:username});
-    if(emailError) throw emailError;
-    const email=emailData;
+    let emailData,emailError;
+    ({data:emailData,error:emailError}=await sb.rpc('login_email_by_username',{p_username:username}));
+    if(emailError){
+      ({data:emailData,error:emailError}=await sb.rpc('get_login_email',{p_username:username}));
+      if(emailError) throw emailError;
+    }
+    const email=emailData || `${username.toLowerCase()}@america-list.local`;
     if(!email) throw new Error('Usuário não encontrado.');
     const {error}=await sb.auth.signInWithPassword({email,password});
     if(error) throw error;
@@ -277,78 +296,56 @@ async function refreshOnline(){
 
 window.logout=async()=>{await sb.auth.signOut();db={user:null,orders:[],drivers:[],fleet:[],users:[]};localStorage.removeItem(KEY);login()};
 
+function initSignaturePad(){
+ const canvas=document.getElementById('signaturePad');
+ if(!canvas)return;
+ const resize=()=>{const r=canvas.getBoundingClientRect(),dpr=Math.max(1,window.devicePixelRatio||1);canvas.width=Math.round(r.width*dpr);canvas.height=Math.round(r.height*dpr);const c=canvas.getContext('2d');c.setTransform(dpr,0,0,dpr,0,0);c.lineWidth=2.2;c.lineCap='round';c.lineJoin='round';};
+ resize();
+ const point=e=>{const r=canvas.getBoundingClientRect();return{x:e.clientX-r.left,y:e.clientY-r.top}};
+ let drawing=false,last=null;
+ canvas.addEventListener('pointerdown',e=>{e.preventDefault();drawing=true;last=point(e);canvas.setPointerCapture?.(e.pointerId)});
+ canvas.addEventListener('pointermove',e=>{if(!drawing)return;e.preventDefault();const p=point(e),c=canvas.getContext('2d');c.beginPath();c.moveTo(last.x,last.y);c.lineTo(p.x,p.y);c.stroke();last=p;canvas.dataset.signed='1'});
+ const end=()=>{drawing=false;last=null};
+ canvas.addEventListener('pointerup',end);canvas.addEventListener('pointercancel',end);canvas.addEventListener('pointerleave',end);
+}
+window.clearSignature=()=>{const c=document.getElementById('signaturePad');if(!c)return;const x=c.getContext('2d');x.clearRect(0,0,c.width,c.height);c.dataset.signed='0';};
 window.saveOrder=async()=>{
  const required=[['driver','Motorista'],['plate','Placa'],['assoc','Associado'],['vehicleType','Tipo de Veículo'],['model','Modelo do Veículo'],['color','Cor'],['protocol','Protocolo']];
  const missing=required.filter(([id])=>!document.getElementById(id).value.trim()).map(x=>x[1]);
  document.querySelectorAll('.invalid').forEach(x=>x.classList.remove('invalid'));
- if(missing.length){
-   missing.forEach(n=>{const pair=required.find(x=>x[1]===n);document.getElementById(pair[0]).classList.add('invalid')});
-   const v=document.getElementById('validation');v.classList.remove('hidden');
-   v.innerHTML='<b>Preencha os campos obrigatórios:</b> '+missing.join(', ');
-   return;
- }
+ if(missing.length){missing.forEach(n=>{const pair=required.find(x=>x[1]===n);document.getElementById(pair[0]).classList.add('invalid')});const v=document.getElementById('validation');v.classList.remove('hidden');v.innerHTML='<b>Preencha os campos obrigatórios:</b> '+missing.join(', ');return;}
  const protocol=document.getElementById('protocol').value.trim();
- if(db.orders.some(x=>String(x.protocol||'').trim().toLowerCase()===protocol.toLowerCase())){
-   const v=document.getElementById('validation');v.classList.remove('hidden');
-   v.innerHTML='<b>Protocolo duplicado.</b> Já existe uma O.S. cadastrada com este protocolo.';
-   document.getElementById('protocol').classList.add('invalid'); return;
- }
+ if(db.orders.some(x=>String(x.protocol||'').trim().toLowerCase()===protocol.toLowerCase())){const v=document.getElementById('validation');v.classList.remove('hidden');v.innerHTML='<b>Protocolo duplicado.</b> Já existe uma O.S. cadastrada com este protocolo.';document.getElementById('protocol').classList.add('invalid');return;}
  const checks={};document.querySelectorAll('[data-item]').forEach(el=>checks[el.dataset.item]=el.value);
  const damages=[...document.querySelectorAll('input[name="damage"]:checked')].map(x=>x.value);
  const driver=db.drivers.find(d=>d.name===document.getElementById('driver').value);
  if(!driver){alert('Motorista não encontrado no cadastro. Cadastre o motorista antes de abrir a O.S.');return;}
- const payload={
-   driver_id:driver.id,
-   associated_name:document.getElementById('assoc').value.trim(),
-   plate:document.getElementById('plate').value.trim().toUpperCase(),
-   vehicle_type:document.getElementById('vehicleType').value,
-   vehicle_model:document.getElementById('model').value.trim(),
-   vehicle_color:document.getElementById('color').value,
-   protocol,
-   origin:document.getElementById('origin').value.trim()||null,
-   destination:document.getElementById('destination').value.trim()||null,
-   mileage:document.getElementById('km').value===''?null:Number(document.getElementById('km').value),
-   preexisting_damages:damages,
-   tires:document.getElementById('tires').value||null,
-   keys_with:document.getElementById('keys').value||null,
-   checklist:{items:checks,observations:document.getElementById('obs').value||''}
- };
- const btn=document.querySelector('button[onclick="saveOrder()"]');
- if(btn){btn.disabled=true;btn.textContent='Salvando…';}
+ const signatureCanvas=document.getElementById('signaturePad');
+ const signatureData=signatureCanvas && signatureCanvas.dataset.signed==='1' ? signatureCanvas.toDataURL('image/png') : '';
+ const signedAt=signatureData?new Date().toISOString():null;
+ const payload={driver_id:driver.id,associated_name:document.getElementById('assoc').value.trim(),plate:document.getElementById('plate').value.trim().toUpperCase(),vehicle_type:document.getElementById('vehicleType').value,vehicle_model:document.getElementById('model').value.trim(),vehicle_color:document.getElementById('color').value,protocol,origin:document.getElementById('origin').value.trim()||null,destination:document.getElementById('destination').value.trim()||null,mileage:document.getElementById('km').value===''?null:Number(document.getElementById('km').value),preexisting_damages:damages,tires:document.getElementById('tires').value||null,keys_with:document.getElementById('keys').value||null,checklist:{items:checks,observations:document.getElementById('obs').value||''},status:'Em atendimento',created_by:currentAuthUser.id,signature_data:signatureData||null,signed_at:signedAt};
+ const btn=document.querySelector('button[onclick="saveOrder()"]');if(btn){btn.disabled=true;btn.textContent='Salvando…';}
  try{
-   const data=await adminApi('/api/orders',{method:'POST',body:JSON.stringify(payload)});
-   // O servidor já confirmou a gravação. Mostramos a O.S. imediatamente usando a
-   // linha retornada, sem depender de uma nova leitura do banco naquele instante.
-   const created=normalizeOrder(data);
-   db.orders=[created,...db.orders.filter(x=>x.id!==created.id)];
-   saveLocal();
-   remoteOnline=true;
-
+   const {data,error}=await sb.from('service_orders').insert(payload).select('*,driver:drivers(id,name,user_id)').single();
+   if(error) throw error;
+   const created=normalizeOrder(data);db.orders=[created,...db.orders.filter(x=>x.id!==created.id)];saveLocal();remoteOnline=true;
    const files=[...document.getElementById('photos').files];
    for(let i=0;i<files.length;i++){
      const f=files[i],safe=f.name.replace(/[^a-zA-Z0-9._-]/g,'_');
      const path=`${currentAuthUser.id}/${created.id}/${Date.now()}-${i}-${safe}`;
-     const {error:ue}=await sb.storage.from('os-photos').upload(path,f,{upsert:false,contentType:f.type||'image/jpeg'});
-     if(ue)throw new Error('O.S. salva, mas uma foto não pôde ser enviada: '+ue.message);
-     const {error:pe}=await sb.from('os_photos').insert({os_id:created.id,storage_path:path,file_name:f.name,created_by:currentAuthUser.id});
-     if(pe)throw new Error('O.S. salva, mas o registro da foto falhou: '+pe.message);
+     const {error:ue}=await sb.storage.from('os-photos').upload(path,f,{upsert:false,contentType:f.type||'image/jpeg'});if(ue)throw new Error('O.S. salva, mas uma foto não pôde ser enviada: '+ue.message);
+     const {error:pe}=await sb.from('os_photos').insert({os_id:created.id,storage_path:path,file_name:f.name,created_by:currentAuthUser.id});if(pe)throw new Error('O.S. salva, mas o registro da foto falhou: '+pe.message);
    }
-
+   await loadPhotos(created.id).catch(()=>{});
+   await refreshOnline();
    alert('O.S. criada e atendimento iniciado com sucesso.');
-   viewOrder(created.id);
-
-   // Atualização complementar em segundo plano. Se o banco demorar a refletir
-   // a leitura, a O.S. já continua visível pela resposta confirmada do servidor.
-   setTimeout(()=>refreshOnline().catch(e=>console.warn('Sincronização posterior:',e)),500);
- }catch(e){
-   alert(e.message||'Não foi possível salvar a O.S.');
- }finally{
-   if(btn){btn.disabled=false;btn.textContent='Salvar e iniciar atendimento';}
- }
+   orders();
+ }catch(e){alert(e.message||'Não foi possível salvar a O.S.');}
+ finally{if(btn){btn.disabled=false;btn.textContent='Salvar e iniciar atendimento';}}
 };
-window.finishOrder=async id=>{try{await adminApi(`/api/orders/${id}`,{method:'PATCH',body:JSON.stringify({status:'Finalizada'})});await refreshOnline();viewOrder(id)}catch(e){alert(e.message||'Não foi possível finalizar a O.S.');}};
-window.problemOrder=async id=>{try{await adminApi(`/api/orders/${id}`,{method:'PATCH',body:JSON.stringify({status:'Com problema'})});await refreshOnline();viewOrder(id)}catch(e){alert(e.message||'Não foi possível atualizar a O.S.');}};
-window.deleteOrder=async id=>{if(db.user?.role!=='admin')return;const o=db.orders.find(x=>x.id===id);if(!o)return;if(!confirm(`Excluir a O.S. do protocolo ${o.protocol}? Esta ação não pode ser desfeita.`))return;try{await adminApi(`/api/orders/${id}`,{method:'DELETE'});await refreshOnline();orders()}catch(e){alert(e.message||'Não foi possível excluir a O.S.');}};
+window.finishOrder=async id=>{try{const {error}=await sb.from('service_orders').update({status:'Finalizada',finalized_at:new Date().toISOString()}).eq('id',id);if(error)throw error;await refreshOnline();viewOrder(id)}catch(e){alert(e.message||'Não foi possível finalizar a O.S.');}};
+window.problemOrder=async id=>{try{const {error}=await sb.from('service_orders').update({status:'Com problema'}).eq('id',id);if(error)throw error;await refreshOnline();viewOrder(id)}catch(e){alert(e.message||'Não foi possível atualizar a O.S.');}};
+window.deleteOrder=async id=>{if(db.user?.role!=='admin')return;const o=db.orders.find(x=>x.id===id);if(!o)return;if(!confirm(`Excluir a O.S. do protocolo ${o.protocol}? Esta ação não pode ser desfeita.`))return;try{const {error}=await sb.from('service_orders').delete().eq('id',id);if(error)throw error;await refreshOnline();orders()}catch(e){alert(e.message||'Não foi possível excluir a O.S.');}};
 
 window.updateOrder=async id=>{
  const req=['driver','plate','assoc','vehicleType','model','color','protocol'];if(req.some(x=>!document.getElementById(x).value.trim())){alert('Preencha todos os campos obrigatórios.');return;}
@@ -356,9 +353,8 @@ window.updateOrder=async id=>{
  const driver=db.drivers.find(d=>d.name===document.getElementById('driver').value);if(!driver){alert('Motorista inválido.');return;}
  const checks={};document.querySelectorAll('[data-item]').forEach(el=>checks[el.dataset.item]=el.value);const damages=[...document.querySelectorAll('input[name="damage"]:checked')].map(x=>x.value);
  const patch={driver_id:driver.id,associated_name:document.getElementById('assoc').value.trim(),plate:document.getElementById('plate').value.trim().toUpperCase(),vehicle_type:document.getElementById('vehicleType').value,vehicle_model:document.getElementById('model').value.trim(),vehicle_color:document.getElementById('color').value,protocol,origin:document.getElementById('origin').value.trim()||null,destination:document.getElementById('destination').value.trim()||null,mileage:document.getElementById('km').value===''?null:Number(document.getElementById('km').value),tires:document.getElementById('tires').value||null,keys_with:document.getElementById('keys').value||null,preexisting_damages:damages,checklist:{items:checks,observations:document.getElementById('obs').value||''}};
- try{await adminApi(`/api/orders/${id}`,{method:'PATCH',body:JSON.stringify(patch)});await refreshOnline();viewOrder(id)}catch(e){alert(e.message||'Falha ao salvar alterações.');}
+ try{const {error}=await sb.from('service_orders').update(patch).eq('id',id);if(error)throw error;await refreshOnline();viewOrder(id)}catch(e){alert(e.message||'Falha ao salvar alterações.');}
 };
-
 window.addDriver=async()=>{if(db.user?.role!=='admin')return dashboard();const n=document.getElementById('dname').value.trim(),username=document.getElementById('duser').value.trim();if(!n){alert('Informe o nome.');return;}try{await adminApi('/api/drivers',{method:'POST',body:JSON.stringify({name:n,username})});alert('Motorista cadastrado com sucesso.');await refreshOnline();manageDrivers();}catch(e){alert(e.message||'Não foi possível cadastrar o motorista.');}};
 window.editDriver=async id=>{const d=db.drivers.find(x=>x.id===id);if(!d)return;const n=prompt('Nome do motorista:',d.name);if(n===null||!n.trim())return;const currentUser=db.users.find(u=>u.id===d.userId)?.username||'';const username=prompt('Usuário vinculado (deixe vazio para remover vínculo):',currentUser);if(username===null)return;try{await adminApi(`/api/drivers/${id}`,{method:'PATCH',body:JSON.stringify({name:n.trim(),username:username.trim()})});await refreshOnline();manageDrivers();}catch(e){alert(e.message||'Não foi possível atualizar o motorista.');}};
 window.deleteDriver=async id=>{if(db.user?.role!=='admin')return;const d=db.drivers.find(x=>x.id===id);if(!d)return;if(!confirm(`Excluir o motorista ${d.name}?`))return;try{await adminApi(`/api/drivers/${id}`,{method:'DELETE'});alert('Motorista excluído com sucesso.');await refreshOnline();manageDrivers();}catch(e){alert(e.message||'Não foi possível excluir o motorista.');}};
@@ -382,80 +378,37 @@ function profile(){
 
 /* Usuários: administração real via servidor seguro + Supabase Auth. */
 async function adminApi(path, options={}){
-  const {data:{session}}=await sb.auth.getSession();
-  if(!session?.access_token) throw new Error('Sessão expirada. Faça login novamente.');
-  const method=(options.method||'GET').toUpperCase();
-  let body={};
-  try{body=options.body?JSON.parse(options.body):{};}catch{}
-
-  // No GitHub Pages não existe /api local. Operações normais usam Supabase diretamente.
-  if(path==='/api/orders'){
-    let q=sb.from('service_orders').select('*,driver:drivers(id,name,user_id)').order('created_at',{ascending:false});
-    if(method==='GET'){
-      const {data,error}=await q; if(error) throw error; return data||[];
-    }
-    if(method==='POST'){
-      const {data,error}=await sb.from('service_orders').insert(body).select('*,driver:drivers(id,name,user_id)').single();
-      if(error) throw error; return data;
-    }
-  }
-  if(path.startsWith('/api/orders/')){
-    const id=path.split('/').pop();
-    if(method==='PATCH'){
-      const {data,error}=await sb.from('service_orders').update(body).eq('id',id).select('*,driver:drivers(id,name,user_id)').single();
-      if(error) throw error; return data;
-    }
-    if(method==='DELETE'){
-      const {error}=await sb.from('service_orders').delete().eq('id',id); if(error) throw error; return {ok:true};
-    }
-  }
-  if(path==='/api/drivers' && method==='POST'){
-    let user_id=null;
-    if(body.username){
-      const {data:p,error}=await sb.from('profiles').select('id,role,active').ilike('username',body.username).maybeSingle();
-      if(error) throw error;
-      if(!p) throw new Error('Usuário vinculado não encontrado.');
-      if(p.role!=='Motorista') throw new Error('O usuário vinculado precisa ter nível Motorista.');
-      if(!p.active) throw new Error('O usuário vinculado está inativo.');
-      user_id=p.id;
-      const {data:existing}=await sb.from('drivers').select('id').eq('user_id',user_id).maybeSingle();
-      if(existing) throw new Error('Este usuário já possui um cadastro de motorista.');
-    }
-    const {data,error}=await sb.from('drivers').insert({name:String(body.name||'').trim(),user_id,active:true}).select('id,user_id,name,active').single();
-    if(error) throw error; return data;
-  }
-  if(path.startsWith('/api/drivers/')){
-    const id=path.split('/').pop();
-    if(method==='PATCH'){
-      let user_id=null;
-      if(body.username){
-        const {data:p,error}=await sb.from('profiles').select('id,role,active').ilike('username',body.username).maybeSingle();
-        if(error) throw error; if(!p) throw new Error('Usuário vinculado não encontrado.');
-        if(p.role!=='Motorista') throw new Error('O usuário vinculado precisa ter nível Motorista.');
-        if(!p.active) throw new Error('O usuário vinculado está inativo.'); user_id=p.id;
-      }
-      const {data,error}=await sb.from('drivers').update({name:String(body.name||'').trim(),user_id}).eq('id',id).select('id,user_id,name,active').single();
-      if(error) throw error; return data;
-    }
-    if(method==='DELETE'){
-      const {data:linked,error:le}=await sb.from('service_orders').select('id',{count:'exact',head:true}).eq('driver_id',id);
-      if(le) throw le;
-      // O RLS do banco decide se a exclusão é permitida.
-      const {error}=await sb.from('drivers').delete().eq('id',id); if(error) throw error; return {ok:true};
-    }
-  }
-
-  // Operações privilegiadas de Auth passam por uma Supabase Edge Function.
-  if(path.startsWith('/api/admin/users')){
-    const parts=path.split('/').filter(Boolean);
-    const id=parts.length>=4?parts[3]:null;
-    const action=id?(method==='DELETE'?'delete_user':'update_user'):'create_user';
-    const fnUrl=`${SUPABASE_URL}/functions/v1/admin-users`;
-    const res=await fetch(fnUrl,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${session.access_token}`},body:JSON.stringify({action,id,...body})});
-    let out={};try{out=await res.json()}catch{}
-    if(!res.ok)throw new Error(out.error||`Erro ${res.status}`); return out;
-  }
-  throw new Error('Operação não disponível no modo hospedado.');
+ const {data:{session}}=await sb.auth.getSession();
+ if(!session?.access_token) throw new Error('Sessão expirada. Faça login novamente.');
+ const method=(options.method||'POST').toUpperCase();
+ const m=path.match(/^\/api\/(?:admin\/users|drivers)(?:\/([^/]+))?$/);
+ if(!m) throw new Error('Operação administrativa não suportada.');
+ const parts=path.split('/').filter(Boolean);
+ let action='';
+ if(parts[1]==='admin'&&parts[2]==='users') action=parts[3]?(method==='DELETE'?'delete_user':'update_user'):'create_user';
+ else if(parts[1]==='drivers') action=parts[2]?(method==='DELETE'?'delete_driver':'update_driver'):'create_driver';
+ const body=options.body?JSON.parse(options.body):{};
+ if(parts[3]) body.id=parts[3];
+ const {data,error}=await sb.functions.invoke('admin-users',{body:{action,...body},headers:{Authorization:`Bearer ${session.access_token}`}});
+ if(error) throw new Error(error.message||'Falha na função administrativa.');
+ if(data?.error) throw new Error(data.error);
+ return data;
+}
+function manageUsers(){
+ if(db.user?.role!=='admin')return dashboard();
+ app.innerHTML=`${header()}<main class="wrap">${nav()}<section class="card">
+ <div class="section-head"><div><h2>Usuários</h2><p class="small">Crie e gerencie contas reais do América List.</p></div><button class="btn gray" onclick="commands()">Voltar</button></div>
+ <div class="grid">
+  <div class="field"><label>Usuário <span class="req">*</span></label><input id="newUname" placeholder="Ex.: allan"></div>
+  <div class="field"><label>Nome completo <span class="req">*</span></label><input id="newUnameFull" placeholder="Nome do usuário"></div>
+  <div class="field"><label>Nível de acesso <span class="req">*</span></label><select id="newUrole"><option value="">Selecione</option><option value="motorista">Motorista</option><option value="assistencia">Assistência</option><option value="admin">Administrador</option></select></div>
+  <div class="field"><label>Senha <span class="req">*</span></label><input id="newUpass" type="password" placeholder="Mínimo 6 caracteres"></div>
+ </div>
+ <button class="btn green" onclick="createUserOnline()">Cadastrar Usuário</button>
+ <p class="small" style="margin-top:10px">A conta é criada no Supabase Authentication. A senha não é armazenada na tabela do aplicativo.</p>
+ </section>
+ <section class="card"><h2>Usuários cadastrados</h2>${db.users.length?`<div style="overflow:auto"><table class="table"><tr><th>Usuário</th><th>Nome</th><th>Nível</th><th>Status</th><th>Ações</th></tr>${db.users.map(u=>`<tr><td>${esc(u.username)}</td><td>${esc(u.name||'—')}</td><td><span class="access-pill ${u.role}">${roleLabel(u.role)}</span></td><td>${u.active?'Ativo':'Inativo'}</td><td><button class="btn" onclick="editUser('${u.id}')">Editar</button> <button class="btn red" onclick="deleteUserOnline('${u.id}')" ${u.id===currentAuthUser?.id?'disabled':''}>Excluir</button></td></tr>`).join('')}</table></div>`:'<div class="notice">Nenhum usuário cadastrado.</div>'}</section></main>`;
+ renderThemeButton();
 }
 
 window.createUserOnline=async()=>{

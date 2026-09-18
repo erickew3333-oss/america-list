@@ -1,110 +1,190 @@
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS'
+};
+
+const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
+const serviceRole = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+const adminClient = createClient(supabaseUrl, serviceRole, { auth: { autoRefreshToken: false, persistSession: false } });
+
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 }
 
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { ...cors, 'Content-Type': 'application/json' } })
+function internalEmail(username: string) {
+  return `${username.trim().toLowerCase()}@america-list.local`;
+}
 
-const internalEmail = (username: string) => `${username.trim().toLowerCase()}@america-list.local`
+async function requireAdmin(req: Request) {
+  const auth = req.headers.get('Authorization') || '';
+  if (!auth.startsWith('Bearer ')) return { error: 'Sessão não encontrada.' };
+  const token = auth.slice(7);
+  const { data: userData, error: userError } = await adminClient.auth.getUser(token);
+  if (userError || !userData.user) return { error: 'Sessão inválida ou expirada.' };
+  const { data: profile, error: profileError } = await adminClient
+    .from('profiles').select('id,username,full_name,role,active').eq('id', userData.user.id).single();
+  if (profileError || !profile || !profile.active || profile.role !== 'Administrador') {
+    return { error: 'Acesso restrito ao Administrador.' };
+  }
+  return { user: userData.user, profile };
+}
+
+async function createUser(body: any) {
+  const username = String(body.username || '').trim();
+  const full_name = String(body.full_name || '').trim();
+  const password = String(body.password || '');
+  const role = String(body.role || '');
+  if (!/^[A-Za-z0-9._-]{3,40}$/.test(username)) throw new Error('Usuário inválido. Use 3 a 40 caracteres: letras, números, ponto, hífen ou sublinhado.');
+  if (!full_name) throw new Error('Informe o nome completo.');
+  if (password.length < 6) throw new Error('A senha deve ter pelo menos 6 caracteres.');
+  if (!['Motorista', 'Assistência', 'Administrador'].includes(role)) throw new Error('Nível de acesso inválido.');
+
+  const { data: existing } = await adminClient.from('profiles').select('id').ilike('username', username).maybeSingle();
+  if (existing) throw new Error('Este usuário já está cadastrado.');
+
+  const { data: created, error: createError } = await adminClient.auth.admin.createUser({
+    email: internalEmail(username), password, email_confirm: true,
+    user_metadata: { username, full_name, role }
+  });
+  if (createError) throw new Error(createError.message);
+  const userId = created.user.id;
+
+  const { error: profileError } = await adminClient.from('profiles').insert({ id: userId, username, full_name, role, active: true });
+  if (profileError) {
+    await adminClient.auth.admin.deleteUser(userId);
+    throw new Error(profileError.message);
+  }
+
+  if (role === 'Motorista') {
+    const { error: driverError } = await adminClient.from('drivers').insert({ name: full_name, user_id: userId, active: true });
+    if (driverError) {
+      await adminClient.from('profiles').delete().eq('id', userId);
+      await adminClient.auth.admin.deleteUser(userId);
+      throw new Error(driverError.message);
+    }
+  }
+  return { id: userId, username, full_name, role, active: true };
+}
+
+async function updateUser(body: any, actorId: string) {
+  const id = String(body.id || '');
+  const username = String(body.username || '').trim();
+  const full_name = String(body.full_name || '').trim();
+  const role = String(body.role || '');
+  const password = body.password == null ? '' : String(body.password);
+  if (!id || !full_name || !/^[A-Za-z0-9._-]{3,40}$/.test(username)) throw new Error('Nome ou usuário inválido.');
+  if (!['Motorista', 'Assistência', 'Administrador'].includes(role)) throw new Error('Nível de acesso inválido.');
+  if (password && password.length < 6) throw new Error('A senha deve ter pelo menos 6 caracteres.');
+  if (id === actorId && role !== 'Administrador') throw new Error('O administrador atual não pode remover o próprio nível de Administrador.');
+
+  const { data: oldProfile, error: oldError } = await adminClient.from('profiles').select('id,username,full_name,role,active').eq('id', id).single();
+  if (oldError || !oldProfile) throw new Error('Usuário não encontrado.');
+  const { data: conflict } = await adminClient.from('profiles').select('id').ilike('username', username).neq('id', id).maybeSingle();
+  if (conflict) throw new Error('Este usuário já está cadastrado.');
+
+  const { error: profileError } = await adminClient.from('profiles').update({ username, full_name, role, active: true }).eq('id', id);
+  if (profileError) throw new Error(profileError.message);
+
+  const authPatch: any = { email: internalEmail(username), user_metadata: { username, full_name, role } };
+  if (password) authPatch.password = password;
+  const { error: authError } = await adminClient.auth.admin.updateUserById(id, authPatch);
+  if (authError) throw new Error(authError.message);
+
+  const { data: driver } = await adminClient.from('drivers').select('id').eq('user_id', id).maybeSingle();
+  if (role === 'Motorista') {
+    if (!driver) await adminClient.from('drivers').insert({ name: full_name, user_id: id, active: true });
+    else await adminClient.from('drivers').update({ name: full_name, active: true }).eq('id', driver.id);
+  } else if (driver) {
+    await adminClient.from('drivers').update({ active: false }).eq('id', driver.id);
+  }
+  const { data: updated, error: updatedError } = await adminClient.from('profiles').select('id,username,full_name,role,active').eq('id', id).single();
+  if (updatedError) throw new Error(updatedError.message);
+  return { ok: true, user: updated };
+}
+
+async function deleteUser(body: any, actorId: string) {
+  const id = String(body.id || '');
+  if (!id) throw new Error('Usuário inválido.');
+  if (id === actorId) throw new Error('Você não pode excluir a própria conta.');
+  const { data: driver } = await adminClient.from('drivers').select('id').eq('user_id', id).maybeSingle();
+  if (driver) {
+    const { count, error } = await adminClient.from('service_orders').select('id', { count: 'exact', head: true }).eq('driver_id', driver.id);
+    if (error) throw new Error(error.message);
+    if ((count || 0) > 0) await adminClient.from('drivers').update({ active: false, user_id: null }).eq('id', driver.id);
+    else await adminClient.from('drivers').delete().eq('id', driver.id);
+  }
+  const { error } = await adminClient.auth.admin.deleteUser(id);
+  if (error) throw new Error(error.message);
+  return { ok: true };
+}
+
+async function createDriver(body: any) {
+  const name = String(body.name || '').trim();
+  const username = String(body.username || '').trim();
+  if (!name) throw new Error('Informe o nome do motorista.');
+  let user_id: string | null = null;
+  if (username) {
+    const { data: p, error } = await adminClient.from('profiles').select('id,role,active').ilike('username', username).maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!p) throw new Error('Usuário vinculado não encontrado.');
+    if (p.role !== 'Motorista') throw new Error('O usuário vinculado precisa ter nível Motorista.');
+    if (!p.active) throw new Error('O usuário vinculado está inativo.');
+    user_id = p.id;
+    const { data: existing } = await adminClient.from('drivers').select('id').eq('user_id', user_id).maybeSingle();
+    if (existing) throw new Error('Este usuário já possui um cadastro de motorista.');
+  }
+  const { data, error } = await adminClient.from('drivers').insert({ name, user_id, active: true }).select('id,user_id,name,active').single();
+  if (error) throw new Error(error.message);
+  return data;
+}
+
+async function updateDriver(body: any) {
+  const id = String(body.id || '');
+  const name = String(body.name || '').trim();
+  const username = String(body.username || '').trim();
+  if (!id || !name) throw new Error('Informe o nome do motorista.');
+  let user_id: string | null = null;
+  if (username) {
+    const { data: p, error } = await adminClient.from('profiles').select('id,role,active').ilike('username', username).maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!p) throw new Error('Usuário vinculado não encontrado.');
+    if (p.role !== 'Motorista') throw new Error('O usuário vinculado precisa ter nível Motorista.');
+    user_id = p.id;
+  }
+  const { data, error } = await adminClient.from('drivers').update({ name, user_id }).eq('id', id).select('id,user_id,name,active').single();
+  if (error) throw new Error(error.message);
+  return data;
+}
+
+async function deleteDriver(body: any) {
+  const id = String(body.id || '');
+  const { count, error: ce } = await adminClient.from('service_orders').select('id', { count: 'exact', head: true }).eq('driver_id', id);
+  if (ce) throw new Error(ce.message);
+  if ((count || 0) > 0) throw new Error('Este motorista possui O.S. vinculadas e não pode ser excluído. Para preservar o histórico, inative o cadastro.');
+  const { error } = await adminClient.from('drivers').delete().eq('id', id);
+  if (error) throw new Error(error.message);
+  return { ok: true };
+}
 
 Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: cors })
-  if (req.method !== 'POST') return json({ error: 'Método não permitido.' }, 405)
-
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
+  if (req.method !== 'POST') return json({ error: 'Método não permitido.' }, 405);
   try {
-    const authHeader = req.headers.get('Authorization') || ''
-    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
-    if (!token) return json({ error: 'Sessão não encontrada.' }, 401)
-
-    const url = Deno.env.get('SUPABASE_URL')!
-    const anonKey = Deno.env.get('SUPABASE_ANON_KEY')!
-    const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-    const userClient = createClient(url, anonKey, { global: { headers: { Authorization: `Bearer ${token}` } } })
-    const admin = createClient(url, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } })
-
-    const { data: userData, error: userError } = await userClient.auth.getUser()
-    if (userError || !userData.user) return json({ error: 'Sessão inválida ou expirada.' }, 401)
-
-    const { data: me, error: meError } = await admin.from('profiles')
-      .select('id,username,full_name,role,active')
-      .eq('id', userData.user.id).single()
-    if (meError || !me || me.role !== 'Administrador' || !me.active)
-      return json({ error: 'Acesso restrito ao Administrador.' }, 403)
-
-    const b = await req.json()
-    const action = String(b.action || '')
-
-    if (action === 'create_user') {
-      const username = String(b.username || '').trim()
-      const full_name = String(b.full_name || '').trim()
-      const password = String(b.password || '')
-      const role = String(b.role || '')
-      if (!/^[A-Za-z0-9._-]{3,40}$/.test(username)) return json({ error: 'Usuário inválido.' }, 400)
-      if (!full_name) return json({ error: 'Informe o nome completo.' }, 400)
-      if (password.length < 6) return json({ error: 'A senha deve ter pelo menos 6 caracteres.' }, 400)
-      if (!['Motorista', 'Assistência', 'Administrador'].includes(role)) return json({ error: 'Nível de acesso inválido.' }, 400)
-      const { data: existing } = await admin.from('profiles').select('id').ilike('username', username).maybeSingle()
-      if (existing) return json({ error: 'Este usuário já está cadastrado.' }, 409)
-
-      const { data: created, error: ce } = await admin.auth.admin.createUser({
-        email: internalEmail(username), password, email_confirm: true,
-        user_metadata: { username, full_name, role }
-      })
-      if (ce) return json({ error: ce.message }, 400)
-      const uid = created.user.id
-      const { error: pe } = await admin.from('profiles').insert({ id: uid, username, full_name, role, active: true })
-      if (pe) { await admin.auth.admin.deleteUser(uid); return json({ error: pe.message }, 400) }
-      if (role === 'Motorista') {
-        const { error: de } = await admin.from('drivers').insert({ name: full_name, user_id: uid, active: true })
-        if (de) { await admin.from('profiles').delete().eq('id', uid); await admin.auth.admin.deleteUser(uid); return json({ error: de.message }, 400) }
-      }
-      return json({ id: uid, username, name: full_name, role: role === 'Administrador' ? 'admin' : role === 'Assistência' ? 'assistencia' : 'motorista', active: true })
-    }
-
-    const id = String(b.id || '')
-    if (!id) return json({ error: 'Usuário não informado.' }, 400)
-    if (id === userData.user.id && action === 'delete_user') return json({ error: 'Você não pode excluir a própria conta.' }, 400)
-
-    if (action === 'update_user') {
-      const username = String(b.username || '').trim()
-      const full_name = String(b.full_name || '').trim()
-      const role = String(b.role || '')
-      const password = String(b.password || '')
-      if (!username || !full_name || !['Motorista','Assistência','Administrador'].includes(role)) return json({ error: 'Dados inválidos.' }, 400)
-      const { data: dup } = await admin.from('profiles').select('id').ilike('username', username).neq('id', id).maybeSingle()
-      if (dup) return json({ error: 'Este usuário já está cadastrado.' }, 409)
-      const { error: ue } = await admin.auth.admin.updateUserById(id, { ...(password ? { password } : {}), user_metadata: { username, full_name, role } })
-      if (ue) return json({ error: ue.message }, 400)
-      const { error: pe } = await admin.from('profiles').update({ username, full_name, role }).eq('id', id)
-      if (pe) return json({ error: pe.message }, 400)
-      if (role === 'Motorista') {
-        const { data: d } = await admin.from('drivers').select('id').eq('user_id', id).maybeSingle()
-        if (!d) await admin.from('drivers').insert({ name: full_name, user_id: id, active: true })
-        else await admin.from('drivers').update({ name: full_name, active: true }).eq('id', d.id)
-      } else {
-        await admin.from('drivers').update({ active: false }).eq('user_id', id)
-      }
-      return json({ ok: true })
-    }
-
-    if (action === 'delete_user') {
-      const { data: d } = await admin.from('drivers').select('id').eq('user_id', id).maybeSingle()
-      if (d) {
-        const { count } = await admin.from('service_orders').select('id', { count: 'exact', head: true }).eq('driver_id', d.id)
-        if ((count || 0) > 0) await admin.from('drivers').update({ active: false, user_id: null }).eq('id', d.id)
-        else await admin.from('drivers').delete().eq('id', d.id)
-      }
-      await admin.from('profiles').delete().eq('id', id)
-      const { error: de } = await admin.auth.admin.deleteUser(id)
-      if (de) return json({ error: de.message }, 400)
-      return json({ ok: true })
-    }
-    return json({ error: 'Ação inválida.' }, 400)
+    const auth = await requireAdmin(req);
+    if ('error' in auth) return json({ error: auth.error }, 403);
+    const body = await req.json();
+    const action = String(body.action || '');
+    if (action === 'create_user') return json(await createUser(body), 201);
+    if (action === 'update_user') return json(await updateUser(body, auth.user.id));
+    if (action === 'delete_user') return json(await deleteUser(body, auth.user.id));
+    if (action === 'create_driver') return json(await createDriver(body), 201);
+    if (action === 'update_driver') return json(await updateDriver(body));
+    if (action === 'delete_driver') return json(await deleteDriver(body));
+    return json({ error: 'Ação administrativa desconhecida.' }, 400);
   } catch (e) {
-    return json({ error: e instanceof Error ? e.message : 'Erro interno.' }, 500)
+    return json({ error: e instanceof Error ? e.message : String(e) }, 400);
   }
-})
+});
