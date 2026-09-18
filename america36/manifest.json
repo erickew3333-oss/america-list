@@ -1,0 +1,12 @@
+{
+  "name":"América List",
+  "short_name":"América List",
+  "start_url":"./index.html",
+  "scope":"./",
+  "display":"standalone",
+  "orientation":"portrait",
+  "background_color":"#071b38",
+  "theme_color":"#071b38",
+  "description":"Checklist e Ordens de Serviço - América Assistência",
+  "icons":[{"src":"assets/logo.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}]
+}
